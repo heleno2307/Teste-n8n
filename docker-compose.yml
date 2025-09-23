@@ -1,51 +1,90 @@
-version: '3.8'
+# docker-compose.yaml - Versão Unificada
 
 services:
-  # Serviço do banco de dados PostgreSQL
+  # 1. Serviço ÚNICO de Banco de Dados PostgreSQL para todos
   postgres:
-    image: postgres:14 # Imagem oficial e estável do Postgres.
-    container_name: n8n_postgres
-    restart: always # Garante que o container reinicie em caso de falha.
-    environment:
-      # As variáveis de ambiente para configurar o banco de dados.
-      # É uma boa prática gerenciá-las através de um arquivo .env
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_DB=${POSTGRES_DB}
+    image: postgres:latest # Usando a v14 que estava no seu arquivo n8n
+    container_name: database_postgres
+    restart: always
+    env_file:
+      - .env # As variáveis POSTGRES_* virão daqui
     volumes:
-      # Mapeia um volume nomeado para persistir os dados do banco,
-      # mesmo que o container seja removido e recriado.
-      - postgres-data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      # Verifica se o banco de dados está pronto para aceitar conexões.
-      # O n8n esperará por isso antes de iniciar completamente.
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
+    networks:
+      - evolution-net
 
-  # Serviço da aplicação n8n
+  # 2. Serviço de Cache Redis
+  redis:
+    image: redis:7-alpine
+    container_name: cache_redis
+    restart: always
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - evolution-net
+
+  # 3. Serviço da aplicação n8n
   n8n:
-    image: n8nio/n8n:latest # Utiliza a imagem oficial mais recente do n8n.
+    image: n8nio/n8n:latest
     container_name: n8n_app
     restart: always
     ports:
-      # Expõe a porta 5678 do container na porta 5678 da sua máquina local.
       - "5678:5678"
     environment:
-      # Configurações para o n8n se conectar ao banco de dados Postgres.
+      # Configurações para o n8n se conectar ao banco de dados UNIFICADO
       - DB_TYPE=postgresdb
-      - DB_POSTGRESDB_HOST=postgres # O nome do serviço do banco de dados definido acima.
+      - DB_POSTGRESDB_HOST=postgres # Aponta para o serviço 'postgres'
       - DB_POSTGRESDB_PORT=5432
       - DB_POSTGRESDB_DATABASE=${POSTGRES_DB}
       - DB_POSTGRESDB_USER=${POSTGRES_USER}
       - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - n8n_data:/home/node/.n8n # Volume para persistir dados do n8n
     depends_on:
-      # Garante que o serviço do n8n só tentará iniciar DEPOIS
-      # que o serviço do postgres estiver saudável e pronto.
       postgres:
         condition: service_healthy
+    networks:
+      - evolution-net
 
-# Define os volumes nomeados utilizados nos serviços acima.
+  # 4. Serviço da Evolution API
+  api:
+    container_name: evolution_api
+    image: atendai/evolution-api:latest
+    restart: always
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      n8n: # Opcional, mas garante que o n8n iniciou antes da API
+        condition: service_started # Usamos started pois n8n não tem healthcheck por padrão
+    networks:
+      - evolution-net
+
+# Define todos os volumes nomeados utilizados
 volumes:
-  postgres-data:
+  postgres_data:
+  redis_data:
+  n8n_data:
+  evolution_instances: # Presumi que este volume é usado pela API, se não, pode remover
+
+# Define a rede compartilhada por todos os serviços
+networks:
+  evolution-net:
+    name: evolution-net
+    driver: bridge
